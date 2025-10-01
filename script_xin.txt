@@ -1,0 +1,320 @@
+
+void RLTemplateManager::Close()
+{
+	RL_SCOPED_MUTEX(m_critsect);
+	wxASSERT(wxThread::IsMain());
+	wxDELETE(m_threadPool);
+	wxDELETE(m_thumbnailLoader);
+	m_themeEvtHandlers.clear();
+
+	RLProject* pBlankProject = m_lsTemplates.size() > 0 ? m_lsTemplates.front() : NULL;
+	RLTheme* pBlankTheme = nullptr;
+	if (pBlankProject)
+	{
+		auto& blankThemes = pBlankProject->ThemeManager()->GetThemes();
+		if (!blankThemes.empty())
+			pBlankTheme = blankThemes.front();
+	}
+
+	// Close templates, themes
+	while (!m_lsTemplates.empty())
+	{
+		RLProject* pProject = m_lsTemplates.front();
+
+		if (pProject == pBlankProject)
+		{
+			m_lsTemplates.pop_front();
+			continue;
+		}
+
+		// Only save user object templates
+		bool bSave = false;
+		wxFileName filename(pProject->GetFilePath());
+		if (IsUserTemplatePath(filename.GetFullPath()) && filename.GetExt().IsSameAs(RL_OBJECT_TEMPLATE_FILE_EXT))
+			bSave = true;
+
+		RLTheme* pTheme = pProject->ThemeManager()->GetThemes().front();
+		if (pTheme)
+		{
+			std::list<RLSlideContainer*> layoutContainers = { pTheme->GetSlideMaster() };
+			layoutContainers.push_back(pTheme->GetFeedbackMaster());
+			auto objectSettingContainers = pProject->GetSlideContainers(SLIDE_CONTAINER_OBJECT_SETTINGS);
+
+			std::vector<RLSlideContainer*> vtContainers;
+			vtContainers.insert(vtContainers.end(), layoutContainers.begin(), layoutContainers.end());
+			vtContainers.insert(vtContainers.end(), objectSettingContainers.begin(), objectSettingContainers.end());
+
+			for (auto* pContainer : vtContainers)
+			{
+				if (!pContainer)
+					continue;
+
+				RLSlideContainerType containerType = pContainer->GetType();
+				bool bUseBlankReference = (containerType == SLIDE_CONTAINER_FEEDBACK ||
+					containerType == SLIDE_CONTAINER_LAYOUT);
+
+				if (bUseBlankReference && pBlankTheme)
+				{
+					RLSlideContainer* pBlankContainer = nullptr;
+					if (containerType == SLIDE_CONTAINER_LAYOUT)
+						pBlankContainer = pBlankTheme->GetSlideMaster();
+					else if (containerType == SLIDE_CONTAINER_FEEDBACK)
+						pBlankContainer = pBlankTheme->GetFeedbackMaster();
+
+					if (pBlankContainer)
+					{
+						struct UnmatchedPlaceholderInfo
+						{
+							RLControl* pControl;
+							RLPlaceholderType placeholderType;
+							bool bInLayout;
+							bool bInTitleSlide;
+
+							UnmatchedPlaceholderInfo(RLControl* ctrl, RLPlaceholderType type, bool inLayout, bool inTitle)
+								: pControl(ctrl), placeholderType(type), bInLayout(inLayout), bInTitleSlide(inTitle)
+							{}
+						};
+
+						std::vector<UnmatchedPlaceholderInfo> unmatchedPlaceholders;
+						bool bInLayout = (containerType == SLIDE_CONTAINER_LAYOUT ||
+							containerType == SLIDE_CONTAINER_FEEDBACK);
+
+						for (auto* pSlide : pContainer->GetSlides())
+						{
+							if (!pSlide)
+								continue;
+
+							const RLControlList& lsControls = pSlide->GetControls();
+							RLSlide* pBlankSlide = nullptr;
+							const auto& blankSlides = pBlankContainer->GetSlides();
+							bool bInTitleSlide = (pSlide->GetSlideName().Contains(_("Title")));
+
+							for (auto* pTempSlide : blankSlides)
+							{
+								if (pTempSlide &&
+									(pTempSlide->GetSlideName() == pSlide->GetSlideName()
+										|| pSlide->GetSlideName().Contains(pTempSlide->GetSlideName())))
+								{
+									pBlankSlide = pTempSlide;
+									break;
+								}
+							}
+
+							if (!pBlankSlide)
+							{
+								for (auto* pTempSlide : blankSlides)
+								{
+									if (pTempSlide && pTempSlide->GetType() == pSlide->GetType())
+									{
+										pBlankSlide = pTempSlide;
+										break;
+									}
+								}
+							}
+
+							if (pBlankSlide)
+							{
+								const RLControlList& lsBlankControls = pBlankSlide->GetControls();
+
+								struct ControlKey
+								{
+									int placeholderType;
+									int kind;
+									int subKind;
+
+									bool operator<(const ControlKey& other) const
+									{
+										if (placeholderType != other.placeholderType)
+											return placeholderType < other.placeholderType;
+										if (kind != other.kind)
+											return kind < other.kind;
+										return subKind < other.subKind;
+									}
+								};
+
+								std::map<ControlKey, std::vector<RLControl*>> blankControlGroups;
+								std::map<ControlKey, std::vector<RLControl*>> currentControlGroups;
+
+								for (RLControl* pTempControl : lsBlankControls)
+								{
+									if (!pTempControl)
+										continue;
+
+									ControlKey key = {
+										pTempControl->GetPlaceholderType(),
+										pTempControl->GetKind(),
+										pTempControl->GetSubKind()
+									};
+									blankControlGroups[key].push_back(pTempControl);
+								}
+
+								for (RLControl* pControl : lsControls)
+								{
+									if (!pControl)
+										continue;
+
+									ControlKey key = {
+										pControl->GetPlaceholderType(),
+										pControl->GetKind(),
+										pControl->GetSubKind()
+									};
+									currentControlGroups[key].push_back(pControl);
+								}
+
+								for (auto& pair : currentControlGroups)
+								{
+									const ControlKey& key = pair.first;
+									std::vector<RLControl*>& currentControls = pair.second;
+
+									auto blankIt = blankControlGroups.find(key);
+									if (blankIt == blankControlGroups.end())
+									{
+										for (RLControl* pControl : currentControls)
+										{
+											RLPlaceholderType placeholderType = (RLPlaceholderType)pControl->GetPlaceholderType();
+											if (placeholderType != RL_PLACEHOLDER_NONE)
+											{
+												unmatchedPlaceholders.push_back(
+													UnmatchedPlaceholderInfo(pControl, placeholderType, bInLayout, bInTitleSlide)
+												);
+											}
+										}
+										continue;
+									}
+
+									std::vector<RLControl*>& blankControls = blankIt->second;
+
+									size_t matchCount = std::min(currentControls.size(), blankControls.size());
+
+									for (size_t i = 0; i < matchCount; ++i)
+									{
+										RLControl* pControl = currentControls[i];
+										RLControl* pBlankControl = blankControls[i];
+
+										if (!pControl || !pBlankControl)
+											continue;
+
+										int nStateCount = pControl->GetStateCount();
+										int nBlankStateCount = pBlankControl->GetStateCount();
+
+										if (nStateCount == nBlankStateCount)
+										{
+											for (int j = 0; j < nStateCount && j < nBlankStateCount; ++j)
+											{
+												wxString strBlankText = rlHTML2PlainText(pBlankControl->GetStateByIndex(j)->GetText());
+												wxString strCurrentText = rlHTML2PlainText(pControl->GetStateByIndex(j)->GetText());
+												wxMessageOutputDebug().Printf("strBlankText %s\n", strBlankText);
+												wxMessageOutputDebug().Printf("strCurrentText %s\n", strCurrentText);
+												pControl->GetStateByIndex(j)->SetText(strBlankText);
+												pControl->GetStateByIndex(j)->SetName(pBlankControl->GetStateByIndex(j)->GetName());
+											}
+										}
+									}
+
+									for (size_t i = matchCount; i < currentControls.size(); ++i)
+									{
+										RLControl* pControl = currentControls[i];
+										if (!pControl)
+											continue;
+
+										RLPlaceholderType placeholderType = (RLPlaceholderType)pControl->GetPlaceholderType();
+										if (placeholderType != RL_PLACEHOLDER_NONE)
+										{
+											unmatchedPlaceholders.push_back(
+												UnmatchedPlaceholderInfo(pControl, placeholderType, bInLayout, bInTitleSlide)
+											);
+										}
+									}
+								}
+							}
+
+
+							else
+							{
+								for (RLControl* pControl : lsControls)
+								{
+									if (!pControl)
+										continue;
+
+									RLPlaceholderType placeholderType = (RLPlaceholderType)pControl->GetPlaceholderType();
+									if (placeholderType != RL_PLACEHOLDER_NONE)
+									{
+										unmatchedPlaceholders.push_back(
+											UnmatchedPlaceholderInfo(pControl, placeholderType, bInLayout, bInTitleSlide)
+										);
+									}
+								}
+							}
+						}
+
+						if (!unmatchedPlaceholders.empty())
+						{
+							wxMessageOutputDebug().Printf("=== Processing %zu Unmatched Placeholders ===\n",
+								unmatchedPlaceholders.size());
+
+							for (const auto& info : unmatchedPlaceholders)
+							{
+								if (!info.pControl)
+									continue;
+
+								wxString strDefaultText = RLSlideMaster::GetPlaceholderText(
+									info.placeholderType,
+									info.bInLayout,
+									info.bInTitleSlide
+								);
+
+								wxMessageOutputDebug().Printf("Control ID: %d, PlaceholderType: %d, DefaultText: %s\n",
+									(int)info.pControl->GetControlID(), (int)info.placeholderType, strDefaultText);
+
+								int nStateCount = info.pControl->GetStateCount();
+								for (int i = 0; i < nStateCount; ++i)
+								{
+									wxString strCurrentText = rlHTML2PlainText(info.pControl->GetStateByIndex(i)->GetText());
+									wxMessageOutputDebug().Printf("  Before: %s\n", strCurrentText);
+									info.pControl->GetStateByIndex(i)->SetText(strDefaultText);
+									wxMessageOutputDebug().Printf("  After: %s\n", strDefaultText);
+								}
+							}
+						}
+					}
+				}
+				else
+				{
+					for (auto* pSlide : pContainer->GetSlides())
+					{
+						if (auto* lsControls = pSlide ? pSlide->GetTopLevelControls() : nullptr)
+						{
+							for (auto* pControl : *lsControls)
+							{
+								if (pControl)
+									pProject->UpdateControlTranslation(pControl, true);
+							}
+						}
+					}
+				}
+			}
+			pTheme->MarkNeedUpdate(true, true);
+		}
+
+		bSave = true;
+		pProject->Close(bSave);
+		delete pProject;
+		m_lsTemplates.pop_front();
+	}
+
+	if (pBlankProject)
+	{
+		pBlankProject->Close(false);
+		delete pBlankProject;
+	}
+
+	m_lsOpenedTemplates.clear();
+	RLResourceTaskThread::Get()->OnNotifyFromDB(m_pResourceManager, true);
+	if (m_dbTemplate.IsOpen())
+	{
+		m_pResourceManager->StoreExternalFiles();
+		m_dbTemplate.Close();
+	}
+	m_pStyleManager->DoUnLoadBaseStyles();
+	m_pResourceManager->DoUnLoad();
+}
