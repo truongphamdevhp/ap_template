@@ -79,41 +79,56 @@ void RLTemplateManager::Close()
 						bool bInLayout = (containerType == SLIDE_CONTAINER_LAYOUT ||
 							containerType == SLIDE_CONTAINER_FEEDBACK);
 
-						for (auto* pSlide : pContainer->GetSlides())
+						std::vector<RLSlide*> currentSlides(pContainer->GetSlides().begin(), pContainer->GetSlides().end());
+						std::vector<RLSlide*> blankSlides(pBlankContainer->GetSlides().begin(), pBlankContainer->GetSlides().end());
+
+						size_t slideCount = std::min(currentSlides.size(), blankSlides.size());
+
+						for (size_t slideIdx = 0; slideIdx < currentSlides.size(); ++slideIdx)
 						{
+							RLSlide* pSlide = currentSlides[slideIdx];
 							if (!pSlide)
 								continue;
 
 							const RLControlList& lsControls = pSlide->GetControls();
-							RLSlide* pBlankSlide = nullptr;
-							const auto& blankSlides = pBlankContainer->GetSlides();
 							bool bInTitleSlide = (pSlide->GetSlideName().Contains(_("Title")));
 
-							for (auto* pTempSlide : blankSlides)
+							RLSlide* pBlankSlide = nullptr;
+							if (slideIdx < blankSlides.size())
 							{
-								if (pTempSlide &&
-									(pTempSlide->GetSlideName() == pSlide->GetSlideName()
-										|| pSlide->GetSlideName().Contains(pTempSlide->GetSlideName())))
-								{
-									pBlankSlide = pTempSlide;
-									break;
-								}
+								pBlankSlide = blankSlides[slideIdx];
 							}
 
 							if (!pBlankSlide)
 							{
 								for (auto* pTempSlide : blankSlides)
 								{
-									if (pTempSlide && pTempSlide->GetType() == pSlide->GetType())
+									if (pTempSlide &&
+										(pTempSlide->GetSlideName() == pSlide->GetSlideName()
+											|| pSlide->GetSlideName().Contains(pTempSlide->GetSlideName())))
 									{
 										pBlankSlide = pTempSlide;
 										break;
+									}
+								}
+
+								if (!pBlankSlide)
+								{
+									for (auto* pTempSlide : blankSlides)
+									{
+										if (pTempSlide && pTempSlide->GetType() == pSlide->GetType())
+										{
+											pBlankSlide = pTempSlide;
+											break;
+										}
 									}
 								}
 							}
 
 							if (pBlankSlide)
 							{
+								pSlide->SetSlideName(pBlankSlide->GetSlideName());
+
 								const RLControlList& lsBlankControls = pBlankSlide->GetControls();
 
 								struct ControlKey
@@ -183,7 +198,6 @@ void RLTemplateManager::Close()
 									}
 
 									std::vector<RLControl*>& blankControls = blankIt->second;
-
 									size_t matchCount = std::min(currentControls.size(), blankControls.size());
 
 									for (size_t i = 0; i < matchCount; ++i)
@@ -203,8 +217,10 @@ void RLTemplateManager::Close()
 											{
 												wxString strBlankText = rlHTML2PlainText(pBlankControl->GetStateByIndex(j)->GetText());
 												wxString strCurrentText = rlHTML2PlainText(pControl->GetStateByIndex(j)->GetText());
-												wxMessageOutputDebug().Printf("strBlankText %s\n", strBlankText);
-												wxMessageOutputDebug().Printf("strCurrentText %s\n", strCurrentText);
+												wxMessageOutputDebug().Printf("Slide[%zu] Control[%zu/%zu] strBlankText: %s\n", 
+													slideIdx, i, matchCount, strBlankText);
+												wxMessageOutputDebug().Printf("Slide[%zu] Control[%zu/%zu] strCurrentText: %s\n", 
+													slideIdx, i, matchCount, strCurrentText);
 												pControl->GetStateByIndex(j)->SetText(strBlankText);
 												pControl->GetStateByIndex(j)->SetName(pBlankControl->GetStateByIndex(j)->GetName());
 											}
@@ -227,8 +243,6 @@ void RLTemplateManager::Close()
 									}
 								}
 							}
-
-
 							else
 							{
 								for (RLControl* pControl : lsControls)
@@ -313,8 +327,9 @@ void RLTemplateManager::Close()
 	if (m_dbTemplate.IsOpen())
 	{
 		m_pResourceManager->StoreExternalFiles();
-		m_dbTemplate.Close();
+		m_pResourceManager->DoUnLoad();
 	}
 	m_pStyleManager->DoUnLoadBaseStyles();
 	m_pResourceManager->DoUnLoad();
 }
+
